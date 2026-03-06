@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Grok Imagine Bulk Actions",
+  "version": "1.2",
+  "description": "Bulk download plus unlike and delete liked Grok Imagine posts",
+  "permissions": ["activeTab", "downloads", "storage", "scripting"],
+  "host_permissions": ["https://grok.com/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://grok.com/imagine", "https://grok.com/imagine/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
+
+
