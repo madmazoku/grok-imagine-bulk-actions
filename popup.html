@@ -52,16 +52,18 @@
 <body>
   <div class="header">
     <div class="title">Grok Imagine Bulk Actions</div>
-    <div class="subtitle">API-only mode: Download, unfavorite + delete liked posts.</div>
+    <div class="subtitle">API-only mode: Download, unfavorite + delete posts, and delete files.</div>
   </div>
 
   <div class="body">
     <button id="downloadAll" class="btn">⬇️ Download All</button>
     <button id="unfavoriteAll" class="btn">💔 Unfavorite + Delete All</button>
+    <button id="deleteAllFiles" class="btn">Delete all Files</button>
     <div id="status" class="hint" style="display:none; margin-top:10px;"></div>
 
     <div class="hint">
-      Works on <b>grok.com/imagine/*</b> pages (including <b>/imagine/saved</b>).<br/>
+      Post actions work on <b>grok.com/imagine/*</b> pages (including <b>/imagine/saved</b>).<br/>
+      Files deletion works on <b>grok.com/files</b>.<br/>
       Actions run in-page and show a progress modal.
     </div>
   </div>
@@ -69,5 +71,4 @@
   <script src="popup.js"></script>
 </body>
 </html>
-
 
