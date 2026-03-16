@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Grok Imagine Bulk Actions",
   "version": "1.2",
-  "description": "Bulk download plus unlike and delete liked Grok Imagine posts",
+  "description": "Bulk download, post cleanup, and file deletion for Grok",
   "permissions": ["activeTab", "downloads", "storage", "scripting"],
   "host_permissions": ["https://grok.com/*"],
   "action": {
@@ -23,4 +23,3 @@
     "service_worker": "background.js"
   }
 }
-

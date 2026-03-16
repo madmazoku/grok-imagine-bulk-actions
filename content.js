@@ -1,9 +1,10 @@
 /**
  * Grok Imagine Bulk Actions - Content Script
  * - API-only: no DOM scrolling collection
- * - Two actions:
+ * - Three actions:
  *    1) downloadAll: download all liked posts' media (images + videos) into timestamp folder
  *    2) unfavoriteAll: unlike + delete all liked POSTS (top-level posts only)
+ *    3) deleteAllFiles: delete all files from grok.com/files
  *
  * API used:
  *   POST https://grok.com/rest/media/post/list
@@ -626,7 +627,7 @@ async function handleUnfavoriteAll() {
 }
 
 async function handleDeleteAllFiles() {
-  ProgressModal.show('Delete all Files', 'Fetching files via API...');
+  ProgressModal.show('Delete All Files', 'Fetching files via API...');
 
   const assetIds = await collectAssetsViaAPI();
 
