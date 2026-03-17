@@ -28,18 +28,30 @@ function isActionAllowed(pageKind, action) {
   return false;
 }
 
+const BUTTON_ACTIONS = {
+  downloadAll: { action: 'downloadAll' },
+  unfavoriteAll: { action: 'unfavoriteAll' },
+  unfavoriteAllLimit100: { action: 'unfavoriteAll', collectionLimit: 100 },
+  unfavoriteAllLimit500: { action: 'unfavoriteAll', collectionLimit: 500 },
+  unfavoriteAllLimit1000: { action: 'unfavoriteAll', collectionLimit: 1000 },
+  deleteAllFiles: { action: 'deleteAllFiles' },
+  deleteAllFilesLimit100: { action: 'deleteAllFiles', collectionLimit: 100 },
+  deleteAllFilesLimit500: { action: 'deleteAllFiles', collectionLimit: 500 },
+  deleteAllFilesLimit1000: { action: 'deleteAllFiles', collectionLimit: 1000 },
+};
+
 function disabledTitle(action) {
   if (action === 'deleteAllFiles') return 'Open grok.com/files first';
   return 'Open grok.com/imagine or grok.com/imagine/saved first';
 }
 
 function setEnabled(pageKind) {
-  for (const id of ['downloadAll', 'unfavoriteAll', 'deleteAllFiles']) {
+  for (const [id, config] of Object.entries(BUTTON_ACTIONS)) {
     const el = document.getElementById(id);
     if (!el) continue;
-    const enabled = isActionAllowed(pageKind, id);
+    const enabled = isActionAllowed(pageKind, config.action);
     el.disabled = !enabled;
-    el.title = enabled ? '' : disabledTitle(id);
+    el.title = enabled ? '' : disabledTitle(config.action);
   }
 }
 
@@ -68,7 +80,7 @@ function sendMessageToTab(tabId, message) {
   });
 }
 
-async function sendAction(action) {
+async function sendAction(action, collectionLimit = null) {
   setStatus('');
 
   const tab = await queryActiveTab();
@@ -84,7 +96,8 @@ async function sendAction(action) {
   }
 
   try {
-    await sendMessageToTab(tab.id, { action });
+    const message = collectionLimit === null ? { action } : { action, collectionLimit };
+    await sendMessageToTab(tab.id, message);
     window.close();
   } catch (e) {
     setStatus(`Action failed: ${e?.message || e}`);
@@ -113,13 +126,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   setEnabled(getPageKind(tab?.url || ''));
   await checkReceiver(tab);
 
-  document.getElementById('downloadAll')?.addEventListener('click', () => {
-    void sendAction('downloadAll');
-  });
-  document.getElementById('unfavoriteAll')?.addEventListener('click', () => {
-    void sendAction('unfavoriteAll');
-  });
-  document.getElementById('deleteAllFiles')?.addEventListener('click', () => {
-    void sendAction('deleteAllFiles');
-  });
+  for (const [id, config] of Object.entries(BUTTON_ACTIONS)) {
+    document.getElementById(id)?.addEventListener('click', () => {
+      void sendAction(config.action, config.collectionLimit ?? null);
+    });
+  }
 });

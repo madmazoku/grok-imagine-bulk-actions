@@ -37,8 +37,6 @@ const TIMING = {
   FILE_DELETE_DELAY_MS: 180,
 };
 
-const COLLECTION_LIMIT = 1000;
-
 /* =========================
    Helpers
 ========================= */
@@ -586,10 +584,10 @@ async function apiDeleteAllAssets(assetIds) {
   };
 }
 
-async function handleDownloadAll() {
+async function handleDownloadAll(collectionLimit = null) {
   ProgressModal.show('Download All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
+  const mediaById = await collectLikedMediaViaAPI(collectionLimit);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -614,10 +612,10 @@ async function handleDownloadAll() {
   }
 }
 
-async function handleUnfavoriteAll() {
+async function handleUnfavoriteAll(collectionLimit = null) {
   ProgressModal.show('Unfavorite All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
+  const mediaById = await collectLikedMediaViaAPI(collectionLimit);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -639,10 +637,10 @@ async function handleUnfavoriteAll() {
   window.location.reload();
 }
 
-async function handleDeleteAllFiles() {
+async function handleDeleteAllFiles(collectionLimit = null) {
   ProgressModal.show('Delete All Files', 'Fetching files via API...');
 
-  const assetIds = await collectAssetsViaAPI(COLLECTION_LIMIT);
+  const assetIds = await collectAssetsViaAPI(collectionLimit);
 
   if (!assetIds.length) {
     ProgressModal.hide();
@@ -664,6 +662,7 @@ async function handleDeleteAllFiles() {
 ========================= */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const action = request?.action;
+  const collectionLimit = Number.isFinite(request?.collectionLimit) ? request.collectionLimit : null;
 
   if (action === 'ping') {
     sendResponse({ loaded: true });
@@ -682,11 +681,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       chrome.storage.local.set({ activeOperation: true });
 
       if (action === 'downloadAll') {
-        await handleDownloadAll();
+        await handleDownloadAll(collectionLimit);
       } else if (action === 'unfavoriteAll') {
-        await handleUnfavoriteAll();
+        await handleUnfavoriteAll(collectionLimit);
       } else if (action === 'deleteAllFiles') {
-        await handleDeleteAllFiles();
+        await handleDeleteAllFiles(collectionLimit);
       }
     } catch (e) {
       console.error('Error handling action:', e);
