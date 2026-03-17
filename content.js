@@ -37,6 +37,8 @@ const TIMING = {
   FILE_DELETE_DELAY_MS: 180,
 };
 
+const COLLECTION_LIMIT = 1000;
+
 /* =========================
    Helpers
 ========================= */
@@ -184,18 +186,18 @@ function upsertMedia(entity, kind, mediaById) {
   if (entity.mediaUrl) entry.urls.add(entity.mediaUrl);
 }
 
-async function collectLikedMediaViaAPI() {
+async function collectLikedMediaViaAPI(limit = null) {
   const mediaById = new Map();
+  const collectedPostIds = new Set();
   let cursor = null;
   let page = 0;
-  let totalLoadedPosts = 0;
 
   while (true) {
     if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
 
     ProgressModal.update(
       Math.min(12, 2 + page),
-      `Loading liked posts from API... page ${page + 1}${totalLoadedPosts ? ` (loaded: ${totalLoadedPosts})` : ''}`
+      `Loading liked posts from API... page ${page + 1}${collectedPostIds.size ? ` (loaded: ${collectedPostIds.size})` : ''}`
     );
 
     const payload = {
@@ -224,14 +226,15 @@ async function collectLikedMediaViaAPI() {
 
     const posts = Array.isArray(json.posts) ? json.posts : [];
     if (posts.length === 0) break;
-    totalLoadedPosts += posts.length;
 
     ProgressModal.update(
       Math.min(14, 3 + page),
-      `Loaded ${totalLoadedPosts} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
+      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
     );
 
     for (const post of posts) {
+      if (limit !== null && collectedPostIds.size >= limit) break;
+      collectedPostIds.add(post.id);
       upsertMedia(post, 'post', mediaById);
 
       if (Array.isArray(post.images)) {
@@ -242,6 +245,13 @@ async function collectLikedMediaViaAPI() {
         for (const vid of post.videos) upsertMedia(vid, 'video', mediaById);
       }
     }
+
+    ProgressModal.update(
+      Math.min(14, 3 + page),
+      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}${limit !== null ? ` (limit ${limit})` : ''}...`
+    );
+
+    if (limit !== null && collectedPostIds.size >= limit) break;
 
     cursor = json.nextCursor || null;
     if (!cursor) break;
@@ -268,7 +278,7 @@ function buildAssetsListUrl(pageToken = null) {
   return url.toString();
 }
 
-async function collectAssetsViaAPI() {
+async function collectAssetsViaAPI(limit = null) {
   const assetIds = new Set();
   let pageToken = null;
   let page = 0;
@@ -299,18 +309,21 @@ async function collectAssetsViaAPI() {
     }
 
     const assets = Array.isArray(json.assets) ? json.assets : [];
-    if (assets.length === 0) break;
+    const nextPageToken = json.nextPageToken || null;
 
     for (const asset of assets) {
+      if (limit !== null && assetIds.size >= limit) break;
       if (asset?.assetId) assetIds.add(asset.assetId);
     }
 
     ProgressModal.update(
       Math.min(14, 3 + page),
-      `Loaded ${assetIds.size} file${assetIds.size === 1 ? '' : 's'} across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
+      `Loaded ${assetIds.size} file${assetIds.size === 1 ? '' : 's'} across ${page + 1} page${page + 1 > 1 ? 's' : ''}${limit !== null ? ` (limit ${limit})` : ''}...`
     );
 
-    pageToken = json.nextPageToken || null;
+    if (limit !== null && assetIds.size >= limit) break;
+
+    pageToken = nextPageToken;
     if (!pageToken) break;
 
     page++;
@@ -576,7 +589,7 @@ async function apiDeleteAllAssets(assetIds) {
 async function handleDownloadAll() {
   ProgressModal.show('Download All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI();
+  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -604,7 +617,7 @@ async function handleDownloadAll() {
 async function handleUnfavoriteAll() {
   ProgressModal.show('Unfavorite All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI();
+  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -629,7 +642,7 @@ async function handleUnfavoriteAll() {
 async function handleDeleteAllFiles() {
   ProgressModal.show('Delete All Files', 'Fetching files via API...');
 
-  const assetIds = await collectAssetsViaAPI();
+  const assetIds = await collectAssetsViaAPI(COLLECTION_LIMIT);
 
   if (!assetIds.length) {
     ProgressModal.hide();
