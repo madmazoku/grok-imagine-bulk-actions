@@ -9,7 +9,7 @@ Chrome extension for bulk download and cleanup actions on Grok imagine pages and
 - Delete all files from `grok.com/files`
 - Shows in-page progress with cancel support
 - Uses Grok API pagination and retries failed downloads
-- Uses throttled request pacing for list, download starts, unlike/delete actions, and file deletion
+- Uses throttled request pacing for list collection, download starts, and background cleanup tasks
 - Uses a deferred second pass for failed destructive actions
 - Reloads the page after destructive actions complete
 
@@ -25,14 +25,14 @@ Current popup actions:
 
 - Content script fetches liked posts from:
   - `POST https://grok.com/rest/media/post/list`
-- Unfavorite + delete actions call:
-  - `POST https://grok.com/rest/media/post/unlike`
-  - `POST https://grok.com/rest/media/post/delete`
 - Content script fetches files from:
   - `GET https://grok.com/rest/assets?pageSize=50&orderBy=ORDER_BY_LAST_USE_TIME&source=SOURCE_ANY&isLatest=true`
-- Files deletion calls:
+- Service worker executes destructive tasks in the background via:
+  - `POST https://grok.com/rest/media/post/unlike`
+  - `POST https://grok.com/rest/media/post/delete`
   - `DELETE https://grok.com/rest/assets-metadata/{assetId}`
 - Downloads are delegated to service worker via `chrome.downloads`
+- Only one background task run is allowed at a time across downloads, post cleanup, and file deletion
 - Files are stored under the Chrome downloads folder in:
   - `grok-saved/<timestamp>/...`
 
@@ -58,7 +58,7 @@ Current popup actions:
 - `popup.html` - popup UI
 - `popup.js` - page-aware popup actions and tab messaging
 - `content.js` - API collection, progress modal, action handlers
-- `background.js` - download queue, progress tracking
+- `background.js` - background task runner for downloads and destructive actions, with a single global background-task lock
 
 ## Notes
 
@@ -67,3 +67,4 @@ Current popup actions:
 - Buttons are page-aware: post actions work on imagine pages, file deletion works on `/files`.
 - Post cleanup and file deletion use the same deferred second-pass retry approach.
 - Use at your own risk.
+

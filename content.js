@@ -33,8 +33,7 @@ const TIMING = {
   DOWNLOAD_RELOAD_GRACE_MS: 3000,
   DOWNLOAD_HARD_TIMEOUT_MS: 10 * 60 * 1000,
   DOWNLOAD_RETRY_MAX_ATTEMPTS: 3,
-  UNLIKE_DELETE_DELAY_MS: 180,
-  FILE_DELETE_DELAY_MS: 180,
+  BACKGROUND_TASK_POLL_MS: 250,
 };
 
 /* =========================
@@ -49,6 +48,15 @@ const sleepRandom = (meanMs) => {
 };
 const pad2 = (n) => String(n).padStart(2, '0');
 const storageGet = (keys) => new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+const sendRuntimeMessage = (message) => new Promise((resolve, reject) => {
+  chrome.runtime.sendMessage(message, (response) => {
+    if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+    resolve(response);
+  });
+});
+
+let activeBackgroundTaskType = null;
+let activeBackgroundRunId = null;
 
 function generateDownloadFolderName(date = new Date()) {
   // Local time folder: YYYY-MM-DD_HH-MM
@@ -334,70 +342,101 @@ async function collectAssetsViaAPI(limit = null) {
 /* =========================
    Download via background.js + progress + retries
 ========================= */
-async function downloadMediaFilesAndWait(mediaFiles, { pollMs = TIMING.DOWNLOAD_POLL_MS, showModal = false } = {}) {
+async function downloadMediaFilesAndWait(mediaFiles, { pollMs = TIMING.DOWNLOAD_POLL_MS } = {}) {
   if (!Array.isArray(mediaFiles) || mediaFiles.length === 0) return;
 
   const startedAt = Date.now();
   const reloadGraceMs = TIMING.DOWNLOAD_RELOAD_GRACE_MS;
   const hardTimeoutMs = TIMING.DOWNLOAD_HARD_TIMEOUT_MS;
+  let cancelSent = false;
+  let runId = null;
 
-  await new Promise((resolve, reject) => {
+  const response = await new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ action: 'startDownloads', media: mediaFiles }, (resp) => {
       if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
       if (!resp?.success) return reject(new Error(resp?.error || 'startDownloads failed'));
-      resolve();
+      resolve(resp);
     });
   });
 
-  while (true) {
-    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
+  runId = response?.runId || null;
+  activeBackgroundTaskType = 'download';
+  activeBackgroundRunId = runId;
 
-    const { totalDownloads = 0, downloadQueue = [], fileProgress = {} } =
-      await storageGet(['totalDownloads', 'downloadQueue', 'fileProgress']);
+  try {
+    while (true) {
+      if (ProgressModal.isCancelled() && !cancelSent) {
+        cancelSent = true;
+        try {
+          await sendRuntimeMessage({ action: 'cancelTaskRun', taskType: 'download', runId });
+        } catch (err) {
+          console.warn('Failed to cancel download:', err);
+        }
+      }
 
-    const total = totalDownloads || downloadQueue.length || mediaFiles.length;
+      const {
+        totalDownloads = 0,
+        downloadQueue = [],
+        fileProgress = {},
+        downloadRunId = null,
+      } = await storageGet(['totalDownloads', 'downloadQueue', 'fileProgress', 'downloadRunId']);
 
-    let completed = 0;
-    let failed = 0;
-    let started = 0;
-    let queued = 0;
-    for (const f of downloadQueue) {
-      const st = fileProgress?.[f.filename];
-      if (st === 'complete') completed++;
-      else if (st === 'failed') failed++;
-      else if (st === 'started') started++;
-      else queued++;
-    }
+      if (downloadRunId && runId && downloadRunId !== runId) {
+        throw new Error('download run was replaced by another task');
+      }
 
-    const done = completed + failed;
-    const pct = total ? Math.round((done / total) * 100) : 0;
+      const total = totalDownloads || downloadQueue.length || mediaFiles.length;
 
-    // We don't own the title/subtitle here; caller does. Just update details.
-    ProgressModal.update(pct, `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''})`);
+      let completed = 0;
+      let failed = 0;
+      let started = 0;
+      let queued = 0;
+      let cancelled = 0;
+      for (const f of downloadQueue) {
+        const st = fileProgress?.[f.filename];
+        if (st === 'complete') completed++;
+        else if (st === 'failed') failed++;
+        else if (st === 'started') started++;
+        else if (st === 'cancelled') cancelled++;
+        else queued++;
+      }
 
-    if (total && done >= total) break;
+      const done = completed + failed + cancelled;
+      const pct = total ? Math.round((done / total) * 100) : 0;
 
-    const now = Date.now();
-    if (now - startedAt >= reloadGraceMs && started === 0 && done < total) {
       ProgressModal.update(
         pct,
-        `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''}) - reloading remaining...`
+        `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''}${cancelled ? `, cancelled: ${cancelled}` : ''})`
       );
-      break;
-    }
 
-    if (now - startedAt >= hardTimeoutMs) {
-      const pending = downloadQueue
-        .filter((f) => fileProgress?.[f.filename] !== 'complete')
-        .map((f) => ({ filename: f.filename, status: fileProgress?.[f.filename] || 'queued' }));
-      ProgressModal.update(
-        pct,
-        `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''}) - attempt timeout, retrying remaining...`
-      );
-      break;
-    }
+      if (cancelSent && started === 0) {
+        throw new Error('Operation cancelled by user');
+      }
 
-    await sleepRandom(Math.max(50, pollMs));
+      if (total && done >= total) break;
+
+      const now = Date.now();
+      if (now - startedAt >= reloadGraceMs && started === 0 && done < total) {
+        ProgressModal.update(
+          pct,
+          `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''}${cancelled ? `, cancelled: ${cancelled}` : ''}) - reloading remaining...`
+        );
+        break;
+      }
+
+      if (now - startedAt >= hardTimeoutMs) {
+        ProgressModal.update(
+          pct,
+          `Downloads: ${done}/${total} (complete: ${completed}${failed ? `, failed: ${failed}` : ''}${cancelled ? `, cancelled: ${cancelled}` : ''}) - attempt timeout, retrying remaining...`
+        );
+        break;
+      }
+
+      await sleepRandom(Math.max(50, pollMs));
+    }
+  } finally {
+    if (activeBackgroundTaskType === 'download') activeBackgroundTaskType = null;
+    if (activeBackgroundRunId === runId) activeBackgroundRunId = null;
   }
 }
 
@@ -418,10 +457,14 @@ async function downloadWithRetries(
     if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
 
     ProgressModal.update(5, `Downloading... attempt ${attempt}/${maxAttempts} (${pending.length} files)`);
-    await downloadMediaFilesAndWait(pending, { pollMs });
+    const runId = await downloadMediaFilesAndWait(pending, { pollMs });
 
-    const { downloadQueue = [], fileProgress = {} } =
-      await storageGet(['downloadQueue', 'fileProgress']);
+    const { downloadQueue = [], fileProgress = {}, downloadRunId = null } =
+      await storageGet(['downloadQueue', 'fileProgress', 'downloadRunId']);
+
+    if (downloadRunId && runId && downloadRunId !== runId) {
+      throw new Error('download run was replaced by another task');
+    }
 
     const missing = downloadQueue.filter((f) => fileProgress?.[f.filename] !== 'complete');
     if (missing.length === 0) return [];
@@ -430,8 +473,12 @@ async function downloadWithRetries(
     ProgressModal.update(10, `Reloading ${missing.length} remaining items...`);
   }
 
-  const { downloadQueue = [], fileProgress = {} } =
-    await storageGet(['downloadQueue', 'fileProgress']);
+  const { downloadQueue = [], fileProgress = {}, downloadRunId = null } =
+    await storageGet(['downloadQueue', 'fileProgress', 'downloadRunId']);
+
+  if (downloadRunId === null && downloadQueue.length) {
+    throw new Error('download run metadata is missing while checking final results');
+  }
 
   return downloadQueue.filter((f) => fileProgress?.[f.filename] !== 'complete');
 }
@@ -459,129 +506,162 @@ function buildPostIdsAndMediaFiles(mediaById) {
   return { postIds, mediaFilesBase };
 }
 
-async function runPostActionPass(postIds, { label, startProgress, endProgress, action }) {
-  let ok = 0;
-  let fail = 0;
-  const failedIds = [];
+function countTaskQueueStatuses(queue) {
+  let queued = 0;
+  let started = 0;
+  let complete = 0;
+  let failed = 0;
 
-  for (let i = 0; i < postIds.length; i++) {
-    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
-
-    const id = postIds[i];
-    const pct = startProgress + Math.round(((i + 1) / postIds.length) * Math.max(0, endProgress - startProgress));
-    ProgressModal.update(pct, `${label} ${i + 1}/${postIds.length}...`);
-
-    const resp = await fetch(action === 'unlike' ? API.UNLIKE : API.DELETE, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json', Accept: '*/*' },
-      body: JSON.stringify({ id }),
-    });
-
-    if (resp.ok) ok++;
-    else {
-      fail++;
-      failedIds.push(id);
-    }
-
-    await sleepRandom(TIMING.UNLIKE_DELETE_DELAY_MS);
+  for (const item of Array.isArray(queue) ? queue : []) {
+    if (item?.status === 'queued') queued++;
+    else if (item?.status === 'started') started++;
+    else if (item?.status === 'complete') complete++;
+    else if (item?.status === 'failed') failed++;
   }
 
-  return { ok, fail, failedIds };
+  return { queued, started, complete, failed };
 }
 
-async function runAssetDeletePass(assetIds, { label, startProgress, endProgress }) {
-  let ok = 0;
-  let fail = 0;
-  const failedIds = [];
-
-  for (let i = 0; i < assetIds.length; i++) {
-    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
-
-    const assetId = assetIds[i];
-    const pct = startProgress + Math.round(((i + 1) / assetIds.length) * Math.max(0, endProgress - startProgress));
-    ProgressModal.update(pct, `${label} ${i + 1}/${assetIds.length}...`);
-
-    const resp = await fetch(`${API.ASSET_METADATA}/${encodeURIComponent(assetId)}`, {
-      method: 'DELETE',
-      credentials: 'include',
-      headers: { Accept: '*/*' },
-    });
-
-    if (resp.ok) ok++;
-    else {
-      fail++;
-      failedIds.push(assetId);
-    }
-
-    await sleepRandom(TIMING.FILE_DELETE_DELAY_MS);
-  }
-
-  return { ok, fail, failedIds };
+function progressInRange(startProgress, endProgress, done, total) {
+  if (!total) return startProgress;
+  const ratio = Math.min(1, Math.max(0, done / total));
+  return startProgress + Math.round(ratio * Math.max(0, endProgress - startProgress));
 }
 
-async function apiUnlikeAndDeleteAll(postIds) {
-  const unlikePass1 = await runPostActionPass(postIds, {
-    label: 'Unfavoriting pass 1',
-    startProgress: 15,
-    endProgress: 50,
-    action: 'unlike',
-  });
-  const deletePass1 = await runPostActionPass(postIds, {
-    label: 'Deleting posts pass 1',
-    startProgress: 50,
-    endProgress: 85,
-    action: 'delete',
-  });
+function summarizePostCleanupState(rawState) {
+  const state = rawState || {};
+  const phase = state.phase || 'unlike1';
+  const queue = Array.isArray(state.queue) ? state.queue : [];
+  const counts = countTaskQueueStatuses(queue);
+  const stageTotal = queue.length;
+  const stageDone = counts.complete + counts.failed;
 
-  let unlikePass2 = { ok: 0, fail: 0, failedIds: [] };
-  if (unlikePass1.failedIds.length) {
-    unlikePass2 = await runPostActionPass(unlikePass1.failedIds, {
-      label: 'Unfavoriting pass 2',
-      startProgress: 85,
-      endProgress: 93,
-      action: 'unlike',
-    });
+  let progress = 10;
+  let details = 'Preparing post cleanup...';
+
+  if (phase === 'unlike1') {
+    progress = progressInRange(15, 50, stageDone, stageTotal);
+    details = `Unfavoriting pass 1 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  } else if (phase === 'delete1') {
+    progress = progressInRange(50, 85, stageDone, stageTotal);
+    details = `Deleting posts pass 1 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  } else if (phase === 'unlike2') {
+    progress = progressInRange(85, 93, stageDone, stageTotal);
+    details = `Unfavoriting pass 2 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  } else if (phase === 'delete2') {
+    progress = progressInRange(93, 100, stageDone, stageTotal);
+    details = `Deleting posts pass 2 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
   }
 
-  let deletePass2 = { ok: 0, fail: 0, failedIds: [] };
-  if (deletePass1.failedIds.length) {
-    deletePass2 = await runPostActionPass(deletePass1.failedIds, {
-      label: 'Deleting posts pass 2',
-      startProgress: 93,
-      endProgress: 100,
-      action: 'delete',
-    });
+  if (state.done) {
+    progress = 100;
+    details = `Done. Unfavorited ${state.unlikeOk || 0}/${(state.allIds || []).length}. Deleted ${state.deleteOk || 0}/${(state.allIds || []).length}.`;
+  } else if (state.cancelled) {
+    details = `Cancelling post cleanup${counts.started ? ` (${counts.started} in flight)` : ''}...`;
   }
 
   return {
-    unlikeOk: unlikePass1.ok + unlikePass2.ok,
-    unlikeFail: unlikePass2.fail,
-    deleteOk: deletePass1.ok + deletePass2.ok,
-    deleteFail: deletePass2.fail,
+    progress,
+    details,
+    done: !!state.done,
+    cancelled: !!state.cancelled,
+    queued: counts.queued,
+    started: counts.started,
+    unlikeOk: state.unlikeOk || 0,
+    unlikeFail: Array.isArray(state.failedUnlikeIds) ? state.failedUnlikeIds.length : 0,
+    deleteOk: state.deleteOk || 0,
+    deleteFail: Array.isArray(state.failedDeleteIds) ? state.failedDeleteIds.length : 0,
+    runId: state.runId || null,
   };
+}
+
+function summarizeAssetDeleteState(rawState) {
+  const state = rawState || {};
+  const phase = state.phase || 'delete1';
+  const queue = Array.isArray(state.queue) ? state.queue : [];
+  const counts = countTaskQueueStatuses(queue);
+  const stageTotal = queue.length;
+  const stageDone = counts.complete + counts.failed;
+
+  let progress = 10;
+  let details = 'Preparing file deletion...';
+
+  if (phase === 'delete1') {
+    progress = progressInRange(15, 90, stageDone, stageTotal);
+    details = `Deleting files pass 1 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  } else if (phase === 'delete2') {
+    progress = progressInRange(90, 100, stageDone, stageTotal);
+    details = `Deleting files pass 2 ${stageDone}/${stageTotal}${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  }
+
+  if (state.done) {
+    progress = 100;
+    details = `Done. Deleted ${state.ok || 0}/${(state.allIds || []).length}.`;
+  } else if (state.cancelled) {
+    details = `Cancelling file deletion${counts.started ? ` (${counts.started} in flight)` : ''}...`;
+  }
+
+  return {
+    progress,
+    details,
+    done: !!state.done,
+    cancelled: !!state.cancelled,
+    queued: counts.queued,
+    started: counts.started,
+    ok: state.ok || 0,
+    fail: Array.isArray(state.failedIds) ? state.failedIds.length : 0,
+    runId: state.runId || null,
+  };
+}
+
+async function waitForBackgroundTask(taskType, storageKey, summarizeState, runId) {
+  let cancelSent = false;
+  activeBackgroundTaskType = taskType;
+  activeBackgroundRunId = runId;
+
+  try {
+    while (true) {
+      const snapshot = await storageGet([storageKey]);
+      const rawState = snapshot?.[storageKey] || null;
+      const summary = summarizeState(rawState);
+
+      if (summary.runId && runId && summary.runId !== runId) {
+        throw new Error(`${taskType} run was replaced by another task`);
+      }
+
+      ProgressModal.update(summary.progress, summary.details);
+
+      if (ProgressModal.isCancelled() && !cancelSent) {
+        cancelSent = true;
+        try {
+          await sendRuntimeMessage({ action: 'cancelTaskRun', taskType, runId });
+        } catch (err) {
+          console.warn(`Failed to cancel ${taskType}:`, err);
+        }
+      }
+
+      const drained = summary.queued === 0 && summary.started === 0;
+      if (summary.done || (summary.cancelled && drained)) {
+        return { ...summary, cancelled: summary.cancelled || cancelSent };
+      }
+
+      await sleepRandom(Math.max(50, TIMING.BACKGROUND_TASK_POLL_MS));
+    }
+  } finally {
+    if (activeBackgroundTaskType === taskType) activeBackgroundTaskType = null;
+    if (activeBackgroundRunId === runId) activeBackgroundRunId = null;
+  }
+}
+async function apiUnlikeAndDeleteAll(postIds) {
+  const response = await sendRuntimeMessage({ action: 'startPostCleanup', postIds });
+  if (!response?.success) throw new Error(response?.error || 'startPostCleanup failed');
+  return waitForBackgroundTask('postCleanup', 'postCleanupTaskState', summarizePostCleanupState, response.runId || null);
 }
 
 async function apiDeleteAllAssets(assetIds) {
-  const pass1 = await runAssetDeletePass(assetIds, {
-    label: 'Deleting files pass 1',
-    startProgress: 15,
-    endProgress: 90,
-  });
-
-  let pass2 = { ok: 0, fail: 0, failedIds: [] };
-  if (pass1.failedIds.length) {
-    pass2 = await runAssetDeletePass(pass1.failedIds, {
-      label: 'Deleting files pass 2',
-      startProgress: 90,
-      endProgress: 100,
-    });
-  }
-
-  return {
-    ok: pass1.ok + pass2.ok,
-    fail: pass2.fail,
-  };
+  const response = await sendRuntimeMessage({ action: 'startAssetDelete', assetIds });
+  if (!response?.success) throw new Error(response?.error || 'startAssetDelete failed');
+  return waitForBackgroundTask('assetDelete', 'assetDeleteTaskState', summarizeAssetDeleteState, response.runId || null);
 }
 
 async function handleDownloadAll(collectionLimit = null) {
@@ -627,7 +707,8 @@ async function handleUnfavoriteAll(collectionLimit = null) {
 
   ProgressModal.update(10, `Found ${postIds.length} liked posts. Unfavoriting + deleting...`);
 
-  const { unlikeOk, unlikeFail, deleteOk, deleteFail } = await apiUnlikeAndDeleteAll(postIds);
+  const { unlikeOk, unlikeFail, deleteOk, deleteFail, cancelled } = await apiUnlikeAndDeleteAll(postIds);
+  if (cancelled) throw new Error('Operation cancelled by user');
 
   ProgressModal.hide();
   alert(
@@ -650,7 +731,8 @@ async function handleDeleteAllFiles(collectionLimit = null) {
 
   ProgressModal.update(10, `Found ${assetIds.length} file${assetIds.length === 1 ? '' : 's'}. Deleting...`);
 
-  const { ok, fail } = await apiDeleteAllAssets(assetIds);
+  const { ok, fail, cancelled } = await apiDeleteAllAssets(assetIds);
+  if (cancelled) throw new Error('Operation cancelled by user');
 
   ProgressModal.hide();
   alert(`Done. Deleted ${ok}/${assetIds.length}${fail ? `, failed ${fail}` : ''}.`);
@@ -671,7 +753,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (action === 'cancelOperation') {
     ProgressModal.cancel();
-    chrome.storage.local.set({ activeOperation: false });
+    const activeTaskType = activeBackgroundTaskType;
+    const activeRunId = activeBackgroundRunId;
+    if (activeTaskType) {
+      sendRuntimeMessage({ action: 'cancelTaskRun', taskType: activeTaskType, runId: activeRunId })
+        .catch((err) => console.warn('Failed to cancel background task:', err))
+        .finally(() => chrome.storage.local.set({ activeOperation: false }));
+    } else {
+      chrome.storage.local.set({ activeOperation: false });
+    }
     sendResponse({ success: true });
     return true;
   }
@@ -700,3 +790,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   sendResponse({ accepted: true });
   return true;
 });
+
+
+
+
+
+
+
+
+
