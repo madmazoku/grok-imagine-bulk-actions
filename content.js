@@ -47,8 +47,8 @@ const pad2 = (n) => String(n).padStart(2, '0');
 const storageGet = (keys) => new Promise((resolve) => chrome.storage.local.get(keys, resolve));
 
 function generateDownloadFolderName(date = new Date()) {
-  // Local time folder: YYYY-MM-DD_HH_MM
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}_${pad2(date.getHours())}_${pad2(date.getMinutes())}`;
+  // Local time folder: YYYY-MM-DD_HH-MM
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}_${pad2(date.getHours())}-${pad2(date.getMinutes())}`;
 }
 
 function extFromUrl(url, fallback = 'bin') {

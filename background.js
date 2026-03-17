@@ -1,16 +1,18 @@
 /**
  * Grok Imagine Bulk Actions - Background (Service Worker)
- * NEW VARIANT:
- * - No chrome.downloads.search() (no querying global downloads list)
- * - Fixes "stuck progress" race by using chrome.downloads.onCreated to bind
- *   downloadId -> relative filename early, then onChanged can always update fileProgress.
- * - Filters events by membership in current downloadQueue (so it ignores unrelated downloads)
- * - Keeps:
+ * Phase-1 background task runner:
+ * - Generic in structure so additional background task types can be added later
+ * - Currently only the 'download' task type is registered and executed
+ * - Uses serialized task-state mutations plus bounded queue pumping
+ * - Keeps download compatibility with the existing content-script contract:
  *    - downloadQueue: [{url, filename}]  // filename is RELATIVE inside grok-saved/
  *    - fileProgress: { [relativeFilename]: 'queued'|'started'|'complete'|'failed' }
  *    - fileErrors:   { [relativeFilename]: '...' }
  *    - downloadIdToFile: { [downloadId]: relativeFilename }
  *    - downloadProgress (legacy): { [downloadId]: 'complete'|'failed' }
+ * - Download completion still relies on chrome.downloads events:
+ *    - onCreated binds downloadId -> filename as early as possible
+ *    - onChanged updates completion/failure state and pumps the queue again
  */
 
 const DEFAULT_RANDOM_VARIATION_PCT = 0.1;
@@ -182,11 +184,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 /**
- * Initialize and start a download session.
- * media: Array<{ url: string, filename: string }>
- *   filename MUST be relative inside grok-saved/, e.g. "2026-03-05_18_42/abc.jpg"
+ * Initialize and start a task run.
+ * Phase 1 still uses the download-only message contract:
+ *   media: Array<{ url: string, filename: string }>
+ *   filename MUST be relative inside grok-saved/, e.g. "2026-03-05_18-42/abc.jpg"
  */
-// Generic task bootstrap. The current content script still uses the download-only message contract.
 async function startTaskRun(taskType, items) {
   const task = getTaskType(taskType);
   if (!Array.isArray(items) || items.length === 0) {
@@ -209,7 +211,8 @@ async function pumpTaskQueue(taskType) {
 }
 
 /**
- * Start a single download (records failure if Chrome refuses to start it).
+ * Download task implementation: starts one queued download item.
+ * Records start failure in task state if Chrome refuses the download.
  * Note: mapping downloadId -> filename is set BOTH here (callback) and in onCreated (early).
  */
 function startDownloadItem(item) {
@@ -250,10 +253,8 @@ function startDownloadItem(item) {
 }
 
 /**
- * EARLY binding: when a download is created, bind downloadId -> relative filename.
- * This avoids the race where "complete" arrives before we know filename for that id.
- *
- * We DO NOT query global history; we just react to this event and filter by current queue.
+ * Download task event hook:
+ * bind downloadId -> relative filename as early as possible to avoid completion races.
  */
 chrome.downloads.onCreated.addListener((downloadItem) => {
   try {
@@ -267,8 +268,9 @@ chrome.downloads.onCreated.addListener((downloadItem) => {
 });
 
 /**
- * Completion tracking: update both legacy by-id progress and fileProgress by filename.
- * Only touches fileProgress if the downloadId belongs to our current queue (mapping exists).
+ * Download task completion hook:
+ * update both legacy by-id progress and fileProgress by filename,
+ * then try to pump more queued work for the download task.
  */
 chrome.downloads.onChanged.addListener((delta) => {
   if (!delta?.state) {
