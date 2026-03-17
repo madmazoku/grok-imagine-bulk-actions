@@ -1,27 +1,45 @@
 /**
  * Popup script
- * Only two actions: Download All, Unfavorite + Delete All
+ * Page-aware actions: imagine pages for posts, files page for assets
  * Single approach: sendMessage only (no script injection fallback)
  */
 
-function isSupportedUrl(rawUrl) {
+function getPageKind(rawUrl) {
   try {
     const url = new URL(rawUrl || '');
-    if (url.hostname !== 'grok.com') return false;
+    if (url.hostname !== 'grok.com') return 'other';
 
     const p = url.pathname || '/';
-    return p === '/imagine' || p === '/imagine/' || p === '/imagine/saved' || p.startsWith('/imagine/saved/');
+    if (p === '/imagine' || p === '/imagine/' || p === '/imagine/saved' || p.startsWith('/imagine/saved/')) {
+      return 'imagine';
+    }
+    if (p === '/files' || p === '/files/' || p.startsWith('/files/')) {
+      return 'files';
+    }
+    return 'other';
   } catch {
-    return false;
+    return 'other';
   }
 }
 
-function setEnabled(enabled) {
-  for (const id of ['downloadAll', 'unfavoriteAll']) {
+function isActionAllowed(pageKind, action) {
+  if (action === 'downloadAll' || action === 'unfavoriteAll') return pageKind === 'imagine';
+  if (action === 'deleteAllFiles') return pageKind === 'files';
+  return false;
+}
+
+function disabledTitle(action) {
+  if (action === 'deleteAllFiles') return 'Open grok.com/files first';
+  return 'Open grok.com/imagine or grok.com/imagine/saved first';
+}
+
+function setEnabled(pageKind) {
+  for (const id of ['downloadAll', 'unfavoriteAll', 'deleteAllFiles']) {
     const el = document.getElementById(id);
     if (!el) continue;
+    const enabled = isActionAllowed(pageKind, id);
     el.disabled = !enabled;
-    el.title = enabled ? '' : 'Open grok.com/imagine or grok.com/imagine/saved first';
+    el.title = enabled ? '' : disabledTitle(id);
   }
 }
 
@@ -59,8 +77,9 @@ async function sendAction(action) {
     return;
   }
 
-  if (!isSupportedUrl(tab.url || '')) {
-    setStatus('Open a grok.com/imagine or /imagine/saved page first.');
+  const pageKind = getPageKind(tab.url || '');
+  if (!isActionAllowed(pageKind, action)) {
+    setStatus(disabledTitle(action));
     return;
   }
 
@@ -74,23 +93,24 @@ async function sendAction(action) {
 
 async function checkReceiver(tab) {
   if (!tab?.id) return;
-  if (!isSupportedUrl(tab.url || '')) return;
+  const pageKind = getPageKind(tab.url || '');
+  if (pageKind === 'other') return;
 
   try {
     const resp = await sendMessageToTab(tab.id, { action: 'ping' });
     if (!resp?.loaded) {
       setStatus('Content script did not respond. Reload this page after reloading the extension.');
-      setEnabled(false);
+      setEnabled('other');
     }
   } catch {
     setStatus('Content script is not loaded in this tab. Reload this page after reloading the extension.');
-    setEnabled(false);
+    setEnabled('other');
   }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
   const tab = await queryActiveTab();
-  setEnabled(isSupportedUrl(tab?.url || ''));
+  setEnabled(getPageKind(tab?.url || ''));
   await checkReceiver(tab);
 
   document.getElementById('downloadAll')?.addEventListener('click', () => {
@@ -98,5 +118,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.getElementById('unfavoriteAll')?.addEventListener('click', () => {
     void sendAction('unfavoriteAll');
+  });
+  document.getElementById('deleteAllFiles')?.addEventListener('click', () => {
+    void sendAction('deleteAllFiles');
   });
 });

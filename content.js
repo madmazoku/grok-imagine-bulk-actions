@@ -1,9 +1,10 @@
 /**
  * Grok Imagine Bulk Actions - Content Script
  * - API-only: no DOM scrolling collection
- * - Two actions:
+ * - Three actions:
  *    1) downloadAll: download all liked posts' media (images + videos) into timestamp folder
  *    2) unfavoriteAll: unlike + delete all liked POSTS (top-level posts only)
+ *    3) deleteAllFiles: delete all files from grok.com/files
  *
  * API used:
  *   POST https://grok.com/rest/media/post/list
@@ -19,6 +20,8 @@ const API = {
   LIST: 'https://grok.com/rest/media/post/list',
   UNLIKE: 'https://grok.com/rest/media/post/unlike',
   DELETE: 'https://grok.com/rest/media/post/delete',
+  ASSETS: 'https://grok.com/rest/assets',
+  ASSET_METADATA: 'https://grok.com/rest/assets-metadata',
 };
 
 const FILTER_SOURCE = 'MEDIA_POST_SOURCE_LIKED'; // <-- change if needed
@@ -31,7 +34,10 @@ const TIMING = {
   DOWNLOAD_HARD_TIMEOUT_MS: 10 * 60 * 1000,
   DOWNLOAD_RETRY_MAX_ATTEMPTS: 3,
   UNLIKE_DELETE_DELAY_MS: 180,
+  FILE_DELETE_DELAY_MS: 180,
 };
+
+const COLLECTION_LIMIT = 1000;
 
 /* =========================
    Helpers
@@ -180,18 +186,18 @@ function upsertMedia(entity, kind, mediaById) {
   if (entity.mediaUrl) entry.urls.add(entity.mediaUrl);
 }
 
-async function collectLikedMediaViaAPI() {
+async function collectLikedMediaViaAPI(limit = null) {
   const mediaById = new Map();
+  const collectedPostIds = new Set();
   let cursor = null;
   let page = 0;
-  let totalLoadedPosts = 0;
 
   while (true) {
     if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
 
     ProgressModal.update(
       Math.min(12, 2 + page),
-      `Loading liked posts from API... page ${page + 1}${totalLoadedPosts ? ` (loaded: ${totalLoadedPosts})` : ''}`
+      `Loading liked posts from API... page ${page + 1}${collectedPostIds.size ? ` (loaded: ${collectedPostIds.size})` : ''}`
     );
 
     const payload = {
@@ -220,14 +226,15 @@ async function collectLikedMediaViaAPI() {
 
     const posts = Array.isArray(json.posts) ? json.posts : [];
     if (posts.length === 0) break;
-    totalLoadedPosts += posts.length;
 
     ProgressModal.update(
       Math.min(14, 3 + page),
-      `Loaded ${totalLoadedPosts} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
+      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
     );
 
     for (const post of posts) {
+      if (limit !== null && collectedPostIds.size >= limit) break;
+      collectedPostIds.add(post.id);
       upsertMedia(post, 'post', mediaById);
 
       if (Array.isArray(post.images)) {
@@ -239,6 +246,13 @@ async function collectLikedMediaViaAPI() {
       }
     }
 
+    ProgressModal.update(
+      Math.min(14, 3 + page),
+      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}${limit !== null ? ` (limit ${limit})` : ''}...`
+    );
+
+    if (limit !== null && collectedPostIds.size >= limit) break;
+
     cursor = json.nextCursor || null;
     if (!cursor) break;
 
@@ -247,6 +261,76 @@ async function collectLikedMediaViaAPI() {
   }
 
   return mediaById;
+}
+
+function buildAssetsListUrl(pageToken = null) {
+  const url = new URL(API.ASSETS);
+  url.searchParams.set('pageSize', '50');
+  url.searchParams.set('orderBy', 'ORDER_BY_LAST_USE_TIME');
+  url.searchParams.set('source', 'SOURCE_ANY');
+  url.searchParams.set('isLatest', 'true');
+
+  if (pageToken) {
+    url.searchParams.set('query', '');
+    url.searchParams.set('pageToken', pageToken);
+  }
+
+  return url.toString();
+}
+
+async function collectAssetsViaAPI(limit = null) {
+  const assetIds = new Set();
+  let pageToken = null;
+  let page = 0;
+
+  while (true) {
+    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
+
+    ProgressModal.update(
+      Math.min(12, 2 + page),
+      `Loading files from API... page ${page + 1}${assetIds.size ? ` (loaded: ${assetIds.size})` : ''}`
+    );
+
+    const resp = await fetch(buildAssetsListUrl(pageToken), {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+
+    let json;
+    try {
+      json = await resp.json();
+    } catch {
+      throw new Error(`Failed to parse JSON from /rest/assets (status ${resp.status})`);
+    }
+
+    if (!resp.ok) {
+      throw new Error(`API error ${resp.status} from /rest/assets`);
+    }
+
+    const assets = Array.isArray(json.assets) ? json.assets : [];
+    const nextPageToken = json.nextPageToken || null;
+
+    for (const asset of assets) {
+      if (limit !== null && assetIds.size >= limit) break;
+      if (asset?.assetId) assetIds.add(asset.assetId);
+    }
+
+    ProgressModal.update(
+      Math.min(14, 3 + page),
+      `Loaded ${assetIds.size} file${assetIds.size === 1 ? '' : 's'} across ${page + 1} page${page + 1 > 1 ? 's' : ''}${limit !== null ? ` (limit ${limit})` : ''}...`
+    );
+
+    if (limit !== null && assetIds.size >= limit) break;
+
+    pageToken = nextPageToken;
+    if (!pageToken) break;
+
+    page++;
+    await sleepRandom(TIMING.LIST_PAGE_DELAY_MS);
+  }
+
+  return Array.from(assetIds);
 }
 
 /* =========================
@@ -377,49 +461,135 @@ function buildPostIdsAndMediaFiles(mediaById) {
   return { postIds, mediaFilesBase };
 }
 
-async function apiUnlikeAndDeleteAll(postIds) {
-  let unlikeOk = 0;
-  let unlikeFail = 0;
-  let deleteOk = 0;
-  let deleteFail = 0;
+async function runPostActionPass(postIds, { label, startProgress, endProgress, action }) {
+  let ok = 0;
+  let fail = 0;
+  const failedIds = [];
 
   for (let i = 0; i < postIds.length; i++) {
     if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
 
     const id = postIds[i];
-    const pct = 15 + Math.round(((i + 1) / postIds.length) * 85);
-    ProgressModal.update(pct, `Unfavoriting + deleting ${i + 1}/${postIds.length}...`);
+    const pct = startProgress + Math.round(((i + 1) / postIds.length) * Math.max(0, endProgress - startProgress));
+    ProgressModal.update(pct, `${label} ${i + 1}/${postIds.length}...`);
 
-    const unlikeResp = await fetch(API.UNLIKE, {
+    const resp = await fetch(action === 'unlike' ? API.UNLIKE : API.DELETE, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', Accept: '*/*' },
       body: JSON.stringify({ id }),
     });
 
-    if (unlikeResp.ok) unlikeOk++;
-    else unlikeFail++;
-
-    const deleteResp = await fetch(API.DELETE, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json', Accept: '*/*' },
-      body: JSON.stringify({ id }),
-    });
-
-    if (deleteResp.ok) deleteOk++;
-    else deleteFail++;
+    if (resp.ok) ok++;
+    else {
+      fail++;
+      failedIds.push(id);
+    }
 
     await sleepRandom(TIMING.UNLIKE_DELETE_DELAY_MS);
   }
 
-  return { unlikeOk, unlikeFail, deleteOk, deleteFail };
+  return { ok, fail, failedIds };
+}
+
+async function runAssetDeletePass(assetIds, { label, startProgress, endProgress }) {
+  let ok = 0;
+  let fail = 0;
+  const failedIds = [];
+
+  for (let i = 0; i < assetIds.length; i++) {
+    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
+
+    const assetId = assetIds[i];
+    const pct = startProgress + Math.round(((i + 1) / assetIds.length) * Math.max(0, endProgress - startProgress));
+    ProgressModal.update(pct, `${label} ${i + 1}/${assetIds.length}...`);
+
+    const resp = await fetch(`${API.ASSET_METADATA}/${encodeURIComponent(assetId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: { Accept: '*/*' },
+    });
+
+    if (resp.ok) ok++;
+    else {
+      fail++;
+      failedIds.push(assetId);
+    }
+
+    await sleepRandom(TIMING.FILE_DELETE_DELAY_MS);
+  }
+
+  return { ok, fail, failedIds };
+}
+
+async function apiUnlikeAndDeleteAll(postIds) {
+  const unlikePass1 = await runPostActionPass(postIds, {
+    label: 'Unfavoriting pass 1',
+    startProgress: 15,
+    endProgress: 50,
+    action: 'unlike',
+  });
+  const deletePass1 = await runPostActionPass(postIds, {
+    label: 'Deleting posts pass 1',
+    startProgress: 50,
+    endProgress: 85,
+    action: 'delete',
+  });
+
+  let unlikePass2 = { ok: 0, fail: 0, failedIds: [] };
+  if (unlikePass1.failedIds.length) {
+    unlikePass2 = await runPostActionPass(unlikePass1.failedIds, {
+      label: 'Unfavoriting pass 2',
+      startProgress: 85,
+      endProgress: 93,
+      action: 'unlike',
+    });
+  }
+
+  let deletePass2 = { ok: 0, fail: 0, failedIds: [] };
+  if (deletePass1.failedIds.length) {
+    deletePass2 = await runPostActionPass(deletePass1.failedIds, {
+      label: 'Deleting posts pass 2',
+      startProgress: 93,
+      endProgress: 100,
+      action: 'delete',
+    });
+  }
+
+  return {
+    unlikeOk: unlikePass1.ok + unlikePass2.ok,
+    unlikeFail: unlikePass2.fail,
+    deleteOk: deletePass1.ok + deletePass2.ok,
+    deleteFail: deletePass2.fail,
+  };
+}
+
+async function apiDeleteAllAssets(assetIds) {
+  const pass1 = await runAssetDeletePass(assetIds, {
+    label: 'Deleting files pass 1',
+    startProgress: 15,
+    endProgress: 90,
+  });
+
+  let pass2 = { ok: 0, fail: 0, failedIds: [] };
+  if (pass1.failedIds.length) {
+    pass2 = await runAssetDeletePass(pass1.failedIds, {
+      label: 'Deleting files pass 2',
+      startProgress: 90,
+      endProgress: 100,
+    });
+  }
+
+  return {
+    ok: pass1.ok + pass2.ok,
+    fail: pass2.fail,
+  };
 }
 
 async function handleDownloadAll() {
   ProgressModal.show('Download All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI();
+  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -447,7 +617,7 @@ async function handleDownloadAll() {
 async function handleUnfavoriteAll() {
   ProgressModal.show('Unfavorite All', 'Fetching liked posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI();
+  const mediaById = await collectLikedMediaViaAPI(COLLECTION_LIMIT);
 
   if (!mediaById.size) {
     ProgressModal.hide();
@@ -466,6 +636,26 @@ async function handleUnfavoriteAll() {
     `Done. Unfavorited ${unlikeOk}/${postIds.length}${unlikeFail ? `, unlike failed ${unlikeFail}` : ''}. ` +
     `Deleted ${deleteOk}/${postIds.length}${deleteFail ? `, delete failed ${deleteFail}` : ''}.`
   );
+  window.location.reload();
+}
+
+async function handleDeleteAllFiles() {
+  ProgressModal.show('Delete All Files', 'Fetching files via API...');
+
+  const assetIds = await collectAssetsViaAPI(COLLECTION_LIMIT);
+
+  if (!assetIds.length) {
+    ProgressModal.hide();
+    alert('No files found.');
+    return;
+  }
+
+  ProgressModal.update(10, `Found ${assetIds.length} file${assetIds.length === 1 ? '' : 's'}. Deleting...`);
+
+  const { ok, fail } = await apiDeleteAllAssets(assetIds);
+
+  ProgressModal.hide();
+  alert(`Done. Deleted ${ok}/${assetIds.length}${fail ? `, failed ${fail}` : ''}.`);
   window.location.reload();
 }
 
@@ -495,6 +685,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         await handleDownloadAll();
       } else if (action === 'unfavoriteAll') {
         await handleUnfavoriteAll();
+      } else if (action === 'deleteAllFiles') {
+        await handleDeleteAllFiles();
       }
     } catch (e) {
       console.error('Error handling action:', e);
@@ -509,4 +701,3 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   sendResponse({ accepted: true });
   return true;
 });
-
