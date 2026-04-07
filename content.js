@@ -721,22 +721,49 @@ async function handleUnfavoriteAll(collectionLimit = null) {
 async function handleDeleteAllFiles(collectionLimit = null) {
   ProgressModal.show('Delete All Files', 'Fetching files via API...');
 
-  const assetIds = await collectAssetsViaAPI(collectionLimit);
+  let batch = 0;
+  let totalFound = 0;
+  let totalOk = 0;
+  let totalFail = 0;
 
-  if (!assetIds.length) {
-    ProgressModal.hide();
-    alert('No files found.');
-    return;
+  while (true) {
+    const assetIds = await collectAssetsViaAPI(collectionLimit);
+
+    if (!assetIds.length) {
+      ProgressModal.hide();
+      if (!batch) {
+        alert('No files found.');
+      } else {
+        alert(`Done. Deleted ${totalOk}/${totalFound}${totalFail ? `, failed ${totalFail}` : ''}.`);
+        window.location.reload();
+      }
+      return;
+    }
+
+    batch++;
+    totalFound += assetIds.length;
+
+    ProgressModal.update(
+      10,
+      `Found ${assetIds.length} file${assetIds.length === 1 ? '' : 's'} in batch ${batch}. Deleting...`
+    );
+
+    const { ok, fail, cancelled } = await apiDeleteAllAssets(assetIds);
+    if (cancelled) throw new Error('Operation cancelled by user');
+
+    totalOk += ok;
+    totalFail += fail;
+
+    if (fail) {
+      ProgressModal.hide();
+      alert(`Stopped. Deleted ${totalOk}/${totalFound}, failed ${totalFail}.`);
+      window.location.reload();
+      return;
+    }
+
+    ProgressModal.update(5, 'Checking for files that appeared after deletion...');
+    await sleepRandom(TIMING.LIST_PAGE_DELAY_MS);
   }
-
-  ProgressModal.update(10, `Found ${assetIds.length} file${assetIds.length === 1 ? '' : 's'}. Deleting...`);
-
-  const { ok, fail, cancelled } = await apiDeleteAllAssets(assetIds);
-  if (cancelled) throw new Error('Operation cancelled by user');
-
-  ProgressModal.hide();
-  alert(`Done. Deleted ${ok}/${assetIds.length}${fail ? `, failed ${fail}` : ''}.`);
-  window.location.reload();
 }
 
 /* =========================
