@@ -275,6 +275,7 @@ function buildAssetsListUrl(pageToken = null) {
   url.searchParams.set('orderBy', 'ORDER_BY_LAST_USE_TIME');
   url.searchParams.set('source', 'SOURCE_ANY');
   url.searchParams.set('isLatest', 'true');
+  url.searchParams.set('includeImagineFiles', 'true');
 
   if (pageToken) {
     url.searchParams.set('query', '');
