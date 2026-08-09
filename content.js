@@ -1,30 +1,31 @@
 /**
  * Grok Imagine Bulk Actions - Content Script
  * - API-only: no DOM scrolling collection
- * - Three actions:
- *    1) downloadAll: download all liked posts' media (images + videos) into timestamp folder
- *    2) unfavoriteAll: unlike + delete all liked POSTS (top-level posts only)
- *    3) deleteAllFiles: delete all files from grok.com/files
- *
- * API used:
- *   POST https://grok.com/rest/media/post/list
- *     payload: {limit:40, cursor?, filter:{source:"MEDIA_POST_SOURCE_LIKED"}}
+ * - Downloads generated-only or all image/video assets.
+ * - Deletes generated media, all media, or the complete asset list.
  *
  * Notes:
- * - "liked" source is MEDIA_POST_SOURCE_LIKED. If you want "saved" instead, change FILTER_SOURCE below.
+ * - Imagine collection uses the paginated /rest/assets API.
  * - Downloads are performed by background.js via chrome.runtime.sendMessage({action:"startDownloads", media:[{url,filename}]})
  *   and progress is tracked through chrome.storage.local keys: downloadQueue, fileProgress, fileErrors.
  */
 
 const API = {
-  LIST: 'https://grok.com/rest/media/post/list',
   UNLIKE: 'https://grok.com/rest/media/post/unlike',
   DELETE: 'https://grok.com/rest/media/post/delete',
   ASSETS: 'https://grok.com/rest/assets',
   ASSET_METADATA: 'https://grok.com/rest/assets-metadata',
 };
 
-const FILTER_SOURCE = 'MEDIA_POST_SOURCE_LIKED'; // <-- change if needed
+const MEDIA_MIME_TYPES = [
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+  'video/mp4', 'video/webm', 'video/quicktime',
+];
+
+const MIME_EXTENSIONS = {
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+};
 
 const TIMING = {
   RANDOM_VARIATION_PCT: 0.1,
@@ -168,124 +169,31 @@ const ProgressModal = {
   },
 };
 
-/* =========================
-   API collection (Map)
-========================= */
-/**
- * Map<id, { id, kind:'post'|'image'|'video', urls:Set<string> }>
- * Rules:
- *  - top-level posts -> kind 'post'
- *  - post.images[] -> kind 'image'
- *  - post.videos[] -> kind 'video'
- *  - if same id is seen again as 'post', it upgrades to 'post'
- */
-function upsertMedia(entity, kind, mediaById) {
-  if (!entity || !entity.id) return;
-  const id = entity.id;
-
-  if (!mediaById.has(id)) {
-    mediaById.set(id, { id, kind, urls: new Set() });
-  }
-  const entry = mediaById.get(id);
-
-  if (kind === 'post') entry.kind = 'post';
-  if (entity.mediaUrl) entry.urls.add(entity.mediaUrl);
-}
-
-async function collectLikedMediaViaAPI(limit = null) {
-  const mediaById = new Map();
-  const collectedPostIds = new Set();
-  let cursor = null;
-  let page = 0;
-
-  while (true) {
-    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
-
-    ProgressModal.update(
-      Math.min(12, 2 + page),
-      `Loading liked posts from API... page ${page + 1}${collectedPostIds.size ? ` (loaded: ${collectedPostIds.size})` : ''}`
-    );
-
-    const payload = {
-      limit: 40,
-      filter: { source: FILTER_SOURCE },
-      ...(cursor ? { cursor } : {}),
-    };
-
-    const resp = await fetch(API.LIST, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json', Accept: '*/*' },
-      body: JSON.stringify(payload),
-    });
-
-    let json;
-    try {
-      json = await resp.json();
-    } catch {
-      throw new Error(`Failed to parse JSON from /rest/media/post/list (status ${resp.status})`);
-    }
-
-    if (!resp.ok) {
-      throw new Error(`API error ${resp.status} from /rest/media/post/list`);
-    }
-
-    const posts = Array.isArray(json.posts) ? json.posts : [];
-    if (posts.length === 0) break;
-
-    ProgressModal.update(
-      Math.min(14, 3 + page),
-      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}...`
-    );
-
-    for (const post of posts) {
-      if (limit !== null && collectedPostIds.size >= limit) break;
-      collectedPostIds.add(post.id);
-      upsertMedia(post, 'post', mediaById);
-
-      if (Array.isArray(post.images)) {
-        for (const img of post.images) upsertMedia(img, 'image', mediaById);
-      }
-
-      if (Array.isArray(post.videos)) {
-        for (const vid of post.videos) upsertMedia(vid, 'video', mediaById);
-      }
-    }
-
-    ProgressModal.update(
-      Math.min(14, 3 + page),
-      `Loaded ${collectedPostIds.size} liked posts across ${page + 1} page${page + 1 > 1 ? 's' : ''}${limit !== null ? ` (limit ${limit})` : ''}...`
-    );
-
-    if (limit !== null && collectedPostIds.size >= limit) break;
-
-    cursor = json.nextCursor || null;
-    if (!cursor) break;
-
-    page++;
-    await sleepRandom(TIMING.LIST_PAGE_DELAY_MS);
-  }
-
-  return mediaById;
-}
-
-function buildAssetsListUrl(pageToken = null) {
+function buildAssetsListUrl(pageToken = null, { mediaOnly = false } = {}) {
   const url = new URL(API.ASSETS);
   url.searchParams.set('pageSize', '50');
+  if (mediaOnly) {
+    for (const mimeType of MEDIA_MIME_TYPES) url.searchParams.append('mimeTypes', mimeType);
+  }
   url.searchParams.set('orderBy', 'ORDER_BY_LAST_USE_TIME');
   url.searchParams.set('source', 'SOURCE_ANY');
   url.searchParams.set('isLatest', 'true');
   url.searchParams.set('includeImagineFiles', 'true');
 
   if (pageToken) {
-    url.searchParams.set('query', '');
     url.searchParams.set('pageToken', pageToken);
   }
 
   return url.toString();
 }
 
-async function collectAssetsViaAPI(limit = null) {
+function assetMatchesScope(asset, scope) {
+  if (scope === 'all') return true;
+  if (!MEDIA_MIME_TYPES.includes(asset?.mimeType)) return false;
+  return scope !== 'generated' || asset.isModelGenerated === true;
+}
+
+async function collectAssetsViaAPI(limit = null, scope = 'all') {
   const assetIds = new Set();
   let pageToken = null;
   let page = 0;
@@ -298,7 +206,7 @@ async function collectAssetsViaAPI(limit = null) {
       `Loading files from API... page ${page + 1}${assetIds.size ? ` (loaded: ${assetIds.size})` : ''}`
     );
 
-    const resp = await fetch(buildAssetsListUrl(pageToken), {
+    const resp = await fetch(buildAssetsListUrl(pageToken, { mediaOnly: scope !== 'all' }), {
       method: 'GET',
       credentials: 'include',
       headers: { Accept: 'application/json, text/plain, */*' },
@@ -320,7 +228,7 @@ async function collectAssetsViaAPI(limit = null) {
 
     for (const asset of assets) {
       if (limit !== null && assetIds.size >= limit) break;
-      if (asset?.assetId) assetIds.add(asset.assetId);
+      if (asset && asset.assetId && assetMatchesScope(asset, scope)) assetIds.add(asset.assetId);
     }
 
     ProgressModal.update(
@@ -338,6 +246,98 @@ async function collectAssetsViaAPI(limit = null) {
   }
 
   return Array.from(assetIds);
+}
+
+async function collectDownloadableAssetsViaAPI(scope, limit = null) {
+  const mediaFiles = [];
+  const seenAssetIds = new Set();
+  const scopeLabel = scope === 'generated' ? 'generated files' : 'media files';
+  let pageToken = null;
+  let page = 0;
+
+  while (true) {
+    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
+
+    ProgressModal.update(
+      Math.min(12, 2 + page),
+      `Loading ${scopeLabel} from API... page ${page + 1}${mediaFiles.length ? ` (loaded: ${mediaFiles.length})` : ''}`
+    );
+
+    const resp = await fetch(buildAssetsListUrl(pageToken, { mediaOnly: true }), {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+    const json = await resp.json().catch(() => {
+      throw new Error(`Failed to parse JSON from /rest/assets (status ${resp.status})`);
+    });
+    if (!resp.ok) throw new Error(`API error ${resp.status} from /rest/assets`);
+
+    const assets = Array.isArray(json.assets) ? json.assets : [];
+    for (const asset of assets) {
+      if (limit !== null && mediaFiles.length >= limit) break;
+      if (!asset?.assetId || seenAssetIds.has(asset.assetId)) continue;
+      seenAssetIds.add(asset.assetId);
+
+      if (!assetMatchesScope(asset, scope) || !asset.key) continue;
+      const ext = MIME_EXTENSIONS[asset.mimeType] || extFromUrl(asset.key, 'bin');
+      mediaFiles.push({
+        url: `https://assets.grok.com/${String(asset.key).replace(/^\/+/, '')}`,
+        filename: `${asset.assetId}.${ext}`,
+      });
+    }
+
+    if (limit !== null && mediaFiles.length >= limit) break;
+    pageToken = json.nextPageToken || null;
+    if (!pageToken) break;
+
+    page++;
+    await sleepRandom(TIMING.LIST_PAGE_DELAY_MS);
+  }
+
+  return mediaFiles;
+}
+
+async function collectImaginePostIdsViaAssetsAPI(limit = null) {
+  const postIds = new Set();
+  let pageToken = null;
+  let page = 0;
+
+  while (true) {
+    if (ProgressModal.isCancelled()) throw new Error('Operation cancelled by user');
+
+    ProgressModal.update(
+      Math.min(12, 2 + page),
+      `Loading Imagine posts from API... page ${page + 1}${postIds.size ? ` (loaded: ${postIds.size})` : ''}`
+    );
+
+    const resp = await fetch(buildAssetsListUrl(pageToken, { mediaOnly: true }), {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: 'application/json, text/plain, */*' },
+    });
+    const json = await resp.json().catch(() => {
+      throw new Error(`Failed to parse JSON from /rest/assets (status ${resp.status})`);
+    });
+    if (!resp.ok) throw new Error(`API error ${resp.status} from /rest/assets`);
+
+    const assets = Array.isArray(json.assets) ? json.assets : [];
+    for (const asset of assets) {
+      if (limit !== null && postIds.size >= limit) break;
+      // A single Imagine response can contain several generated image assets.
+      // responseId is the shared post identifier used by the post actions.
+      if (asset?.isModelGenerated && asset.responseId) postIds.add(asset.responseId);
+    }
+
+    if (limit !== null && postIds.size >= limit) break;
+    pageToken = json.nextPageToken || null;
+    if (!pageToken) break;
+
+    page++;
+    await sleepRandom(TIMING.LIST_PAGE_DELAY_MS);
+  }
+
+  return Array.from(postIds);
 }
 
 /* =========================
@@ -487,25 +487,6 @@ async function downloadWithRetries(
 /* =========================
    Actions
 ========================= */
-
-function buildPostIdsAndMediaFiles(mediaById) {
-  const postIds = [];
-  const mediaFilesBase = [];
-
-  for (const [id, entry] of mediaById) {
-    if (entry.kind === 'post') postIds.push(id);
-
-    // If multiple URLs per same id, avoid overwriting by adding __N suffix
-    let i = 1;
-    for (const url of entry.urls) {
-      const ext = extFromUrl(url, entry.kind === 'video' ? 'mp4' : 'jpg');
-      const suffix = (entry.urls.size > 1) ? `__${i++}` : '';
-      mediaFilesBase.push({ url, filename: `${id}${suffix}.${ext}` });
-    }
-  }
-
-  return { postIds, mediaFilesBase };
-}
 
 function countTaskQueueStatuses(queue) {
   let queued = 0;
@@ -665,21 +646,21 @@ async function apiDeleteAllAssets(assetIds) {
   return waitForBackgroundTask('assetDelete', 'assetDeleteTaskState', summarizeAssetDeleteState, response.runId || null);
 }
 
-async function handleDownloadAll(collectionLimit = null) {
-  ProgressModal.show('Download All', 'Fetching liked posts via API...');
+async function handleDownloadAll(scope, collectionLimit = null) {
+  const label = scope === 'generated' ? 'Generated' : 'Media';
+  ProgressModal.show(`Download All ${label}`, `Fetching ${label.toLowerCase()} files via API...`);
 
-  const mediaById = await collectLikedMediaViaAPI(collectionLimit);
+  const mediaFilesBase = await collectDownloadableAssetsViaAPI(scope, collectionLimit);
 
-  if (!mediaById.size) {
+  if (!mediaFilesBase.length) {
     ProgressModal.hide();
-    alert('No liked posts found.');
+    alert(`No ${label.toLowerCase()} files found.`);
     return;
   }
 
-  const { postIds, mediaFilesBase } = buildPostIdsAndMediaFiles(mediaById);
   const folder = generateDownloadFolderName();
 
-  ProgressModal.update(5, `Collected ${postIds.length} posts, ${mediaFilesBase.length} files. Downloading...`);
+  ProgressModal.update(5, `Collected ${mediaFilesBase.length} ${label.toLowerCase()} files. Downloading...`);
 
   const missing = await downloadWithRetries(mediaFilesBase, folder, { maxAttempts: TIMING.DOWNLOAD_RETRY_MAX_ATTEMPTS });
 
@@ -694,19 +675,17 @@ async function handleDownloadAll(collectionLimit = null) {
 }
 
 async function handleUnfavoriteAll(collectionLimit = null) {
-  ProgressModal.show('Unfavorite All', 'Fetching liked posts via API...');
+  ProgressModal.show('Unfavorite All', 'Fetching Imagine posts via API...');
 
-  const mediaById = await collectLikedMediaViaAPI(collectionLimit);
+  const postIds = await collectImaginePostIdsViaAssetsAPI(collectionLimit);
 
-  if (!mediaById.size) {
+  if (!postIds.length) {
     ProgressModal.hide();
-    alert('No liked posts found.');
+    alert('No Imagine posts found.');
     return;
   }
 
-  const { postIds } = buildPostIdsAndMediaFiles(mediaById);
-
-  ProgressModal.update(10, `Found ${postIds.length} liked posts. Unfavoriting + deleting...`);
+  ProgressModal.update(10, `Found ${postIds.length} Imagine posts. Unfavoriting + deleting...`);
 
   const { unlikeOk, unlikeFail, deleteOk, deleteFail, cancelled } = await apiUnlikeAndDeleteAll(postIds);
   if (cancelled) throw new Error('Operation cancelled by user');
@@ -719,8 +698,9 @@ async function handleUnfavoriteAll(collectionLimit = null) {
   window.location.reload();
 }
 
-async function handleDeleteAllFiles(collectionLimit = null) {
-  ProgressModal.show('Delete All Files', 'Fetching files via API...');
+async function handleDeleteAllFiles(scope, collectionLimit = null) {
+  const label = { generated: 'Generated', media: 'Media', all: 'Assets' }[scope] || 'Assets';
+  ProgressModal.show(`Delete All ${label}`, `Fetching ${label.toLowerCase()} via API...`);
 
   let batch = 0;
   let totalFound = 0;
@@ -728,12 +708,12 @@ async function handleDeleteAllFiles(collectionLimit = null) {
   let totalFail = 0;
 
   while (true) {
-    const assetIds = await collectAssetsViaAPI(collectionLimit);
+    const assetIds = await collectAssetsViaAPI(collectionLimit, scope);
 
     if (!assetIds.length) {
       ProgressModal.hide();
       if (!batch) {
-        alert('No files found.');
+        alert(`No ${label.toLowerCase()} found.`);
       } else {
         alert(`Done. Deleted ${totalOk}/${totalFound}${totalFail ? `, failed ${totalFail}` : ''}.`);
         window.location.reload();
@@ -798,12 +778,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     try {
       chrome.storage.local.set({ activeOperation: true });
 
-      if (action === 'downloadAll') {
-        await handleDownloadAll(collectionLimit);
-      } else if (action === 'unfavoriteAll') {
-        await handleUnfavoriteAll(collectionLimit);
-      } else if (action === 'deleteAllFiles') {
-        await handleDeleteAllFiles(collectionLimit);
+      if (action === 'downloadAllGenerated') {
+        await handleDownloadAll('generated', collectionLimit);
+      } else if (action === 'downloadAllMedia') {
+        await handleDownloadAll('media', collectionLimit);
+      } else if (action === 'deleteAllGenerated') {
+        await handleDeleteAllFiles('generated', collectionLimit);
+      } else if (action === 'deleteAllMedia') {
+        await handleDeleteAllFiles('media', collectionLimit);
+      } else if (action === 'deleteAllAssets') {
+        await handleDeleteAllFiles('all', collectionLimit);
       }
     } catch (e) {
       console.error('Error handling action:', e);

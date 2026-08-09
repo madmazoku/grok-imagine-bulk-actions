@@ -13,7 +13,7 @@ const BACKGROUND_TASK_LOCK_KEY = 'backgroundTaskLock';
 const API = {
   UNLIKE: 'https://grok.com/rest/media/post/unlike',
   DELETE: 'https://grok.com/rest/media/post/delete',
-  ASSET_METADATA: 'https://grok.com/rest/assets-metadata',
+  ASSETS: 'https://grok.com/rest/assets',
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -421,7 +421,7 @@ const TASK_TYPES = {
       return picked.map((item) => ({ id: item.id, operation: item.operation, pass: item.pass }));
     },
     async executeItem(item) {
-      const resp = await fetch(`${API.ASSET_METADATA}/${encodeURIComponent(item.id)}`, {
+      const resp = await fetch(`${API.ASSETS}/${encodeURIComponent(item.id)}`, {
         method: 'DELETE',
         credentials: 'include',
         headers: { Accept: '*/*' },
