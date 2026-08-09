@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Grok Imagine Bulk Actions",
   "version": "1.2",
-  "description": "Bulk download, post cleanup, and file deletion for Grok",
+  "description": "Bulk download and scoped asset deletion for Grok",
   "permissions": ["activeTab", "downloads", "storage", "scripting"],
   "host_permissions": ["https://grok.com/*"],
   "action": {
@@ -11,10 +11,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://grok.com/imagine",
-        "https://grok.com/imagine/*",
-        "https://grok.com/files",
-        "https://grok.com/files/*"
+        "https://grok.com/imagine*",
+        "https://grok.com/files*"
       ],
       "js": ["content.js"]
     }

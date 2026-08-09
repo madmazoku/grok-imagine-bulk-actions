@@ -1,6 +1,6 @@
 /**
  * Popup script
- * Page-aware actions: imagine pages for posts, files page for assets
+ * Page-aware download and asset deletion actions
  * Single approach: sendMessage only (no script injection fallback)
  */
 
@@ -23,26 +23,31 @@ function getPageKind(rawUrl) {
 }
 
 function isActionAllowed(pageKind, action) {
-  if (action === 'downloadAll' || action === 'unfavoriteAll') return pageKind === 'imagine';
-  if (action === 'deleteAllFiles') return pageKind === 'files';
+  if (action.startsWith('downloadAll')) return pageKind === 'imagine' || pageKind === 'files';
+  if (action.startsWith('deleteAll')) return pageKind === 'imagine' || pageKind === 'files';
   return false;
 }
 
 const BUTTON_ACTIONS = {
-  downloadAll: { action: 'downloadAll' },
-  unfavoriteAll: { action: 'unfavoriteAll' },
-  unfavoriteAllLimit100: { action: 'unfavoriteAll', collectionLimit: 100 },
-  unfavoriteAllLimit500: { action: 'unfavoriteAll', collectionLimit: 500 },
-  unfavoriteAllLimit1000: { action: 'unfavoriteAll', collectionLimit: 1000 },
-  deleteAllFiles: { action: 'deleteAllFiles' },
-  deleteAllFilesLimit100: { action: 'deleteAllFiles', collectionLimit: 100 },
-  deleteAllFilesLimit500: { action: 'deleteAllFiles', collectionLimit: 500 },
-  deleteAllFilesLimit1000: { action: 'deleteAllFiles', collectionLimit: 1000 },
+  downloadAllGenerated: { action: 'downloadAllGenerated' },
+  downloadAllMedia: { action: 'downloadAllMedia' },
+  deleteAllGenerated: { action: 'deleteAllGenerated' },
+  deleteAllMedia: { action: 'deleteAllMedia' },
+  deleteAllAssets: { action: 'deleteAllAssets' },
 };
 
 function disabledTitle(action) {
-  if (action === 'deleteAllFiles') return 'Open grok.com/files first';
-  return 'Open grok.com/imagine or grok.com/imagine/saved first';
+  if (action.startsWith('deleteAll')) return 'Open grok.com/imagine, grok.com/imagine/saved, or grok.com/files first';
+  return 'Open grok.com/imagine, grok.com/imagine/saved, or grok.com/files first';
+}
+
+function confirmAction(action) {
+  const messages = {
+    deleteAllGenerated: 'Delete all generated image and video assets?',
+    deleteAllMedia: 'Delete all generated and uploaded image and video assets?',
+    deleteAllAssets: 'Delete every asset, including non-media files?',
+  };
+  return !messages[action] || window.confirm(messages[action]);
 }
 
 function setEnabled(pageKind) {
@@ -82,6 +87,7 @@ function sendMessageToTab(tabId, message) {
 
 async function sendAction(action, collectionLimit = null) {
   setStatus('');
+  if (!confirmAction(action)) return;
 
   const tab = await queryActiveTab();
   if (!tab?.id) {

@@ -38,36 +38,9 @@
     }
     .btn:active { transform: translateY(1px); }
     .btn:hover { background: #181818; border-color: #3a3a3a; }
-    .btn + .btn { margin-top: 10px; }
+    .btn { margin-top: 10px; }
     .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
-    .limit-row {
-      display: flex;
-      gap: 8px;
-      margin-top: 8px;
-      margin-bottom: 10px;
-    }
-    .limit-btn {
-      flex: 1;
-      padding: 7px 0;
-      border-radius: 8px;
-      border: 1px solid #2a2a2a;
-      background: #101010;
-      color: #b8b8b8;
-      font-size: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: background .12s ease, border-color .12s ease, opacity .12s ease;
-      text-align: center;
-    }
-    .limit-btn:hover { background: #171717; border-color: #3a3a3a; color: #e5e5e5; }
-    .limit-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
-    #downloadAll { order: 1; }
-    #unfavoriteAll { order: 2; }
-    #unfavoriteLimits { order: 3; }
-    #deleteAllFiles { order: 4; }
-    #deleteFileLimits { order: 5; }
-    #status { order: 6; }
-    .hint:last-of-type { order: 7; }
+    .section-label { margin-top: 14px; color: #8a8a8a; font-size: 11px; font-weight: 700; text-transform: uppercase; }
     .hint {
       margin-top: 14px;
       font-size: 12px;
@@ -84,28 +57,21 @@
 <body>
   <div class="header">
     <div class="title">Grok Imagine Bulk Actions</div>
-    <div class="subtitle">API-only mode: Download, unfavorite + delete posts, and delete files.</div>
+    <div class="subtitle">Download or delete Imagine assets through the Grok API.</div>
   </div>
 
   <div class="body">
-    <button id="downloadAll" class="btn">⬇️ Download All</button>
-    <button id="unfavoriteAll" class="btn">💔 Unfavorite + Delete All</button>
-    <button id="deleteAllFiles" class="btn">🗑️ Delete All Files</button>
-    <div id="unfavoriteLimits" class="limit-row">
-      <button id="unfavoriteAllLimit100" class="limit-btn">100</button>
-      <button id="unfavoriteAllLimit500" class="limit-btn">500</button>
-      <button id="unfavoriteAllLimit1000" class="limit-btn">1000</button>
-    </div>
-    <div id="deleteFileLimits" class="limit-row">
-      <button id="deleteAllFilesLimit100" class="limit-btn">100</button>
-      <button id="deleteAllFilesLimit500" class="limit-btn">500</button>
-      <button id="deleteAllFilesLimit1000" class="limit-btn">1000</button>
-    </div>
+    <div class="section-label">Downloads</div>
+    <button id="downloadAllGenerated" class="btn">Download All Generated</button>
+    <button id="downloadAllMedia" class="btn">Download All Media</button>
+    <div class="section-label">Deletion</div>
+    <button id="deleteAllGenerated" class="btn">Delete All Generated</button>
+    <button id="deleteAllMedia" class="btn">Delete All Media</button>
+    <button id="deleteAllAssets" class="btn">Delete All Assets</button>
     <div id="status" class="hint" style="display:none; margin-top:10px;"></div>
 
     <div class="hint">
-      Post actions work on <b>grok.com/imagine/*</b> pages (including <b>/imagine/saved</b>).<br/>
-      Files deletion works on <b>grok.com/files</b>.<br/>
+      Downloads and deletion work on Imagine, Saved, and Files pages.<br/>
       Actions run in-page and show a progress modal.
     </div>
   </div>
